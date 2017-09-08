@@ -43,6 +43,8 @@ import org.apache.kafka.streams.errors.TaskIdFormatException;
 import org.apache.kafka.streams.processor.PartitionGrouper;
 import org.apache.kafka.streams.processor.StateRestoreListener;
 import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.TaskMetadata;
+import org.apache.kafka.streams.processor.ThreadMetadata;
 import org.apache.kafka.streams.state.internals.ThreadCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,47 +76,52 @@ public class StreamThread extends Thread implements ThreadDataProvider {
      * <p>
      * <pre>
      *                +-------------+
-     *          +<--- | Created     |
+     *          +<--- | Created (0) |
      *          |     +-----+-------+
      *          |           |
      *          |           v
      *          |     +-----+-------+
-     *          +<--- | Running     | <----+
+     *          +<--- | Running (1) | <----+
      *          |     +-----+-------+      |
      *          |           |              |
      *          |           v              |
      *          |     +-----+-------+      |
-     *          +<--- | Partitions  | <-+  |
-     *          |     | Revoked     | --+  |
+     *          +<--- | Partitions  |      |
+     *          |     | Revoked (2) | <----+
      *          |     +-----+-------+      |
      *          |           |              |
      *          |           v              |
      *          |     +-----+-------+      |
      *          |     | Partitions  |      |
-     *          +<--- | Assigned    | +--> +
+     *          |     | Assigned (3)| ---->+
      *          |     +-----+-------+
      *          |           |
      *          |           v
      *          |     +-----+-------+
      *          +---> | Pending     |
-     *                | Shutdown    |
+     *                | Shutdown (4)|
      *                +-----+-------+
      *                      |
      *                      v
      *                +-----+-------+
-     *                | Dead        |
+     *                | Dead (5)    |
      *                +-------------+
      * </pre>
+     *
      * <p>
      * Note the following:
-     * - Any state can go to PENDING_SHUTDOWN followed by a subsequent transition to DEAD.
-     * - A streams thread can stay in PARTITIONS_REVOKED indefinitely, in the corner case when
+     * - Any state can go to PENDING_SHUTDOWN.
+     *   That is because streams can be closed at any time.
+     * - State PENDING_SHUTDOWN may want to transit to some other states other than DEAD, in the corner case when
+     *   the shutdown is triggered while the thread is still in the rebalance loop.
+     *   In this case we will forbid the transition but will not treat as an error.
+     * - State PARTITIONS_REVOKED may want transit to itself indefinitely, in the corner case when
      *   the coordinator repeatedly fails in-between revoking partitions and assigning new partitions.
+     *   In this case we will forbid the transition but will not treat as an error.
      *
      */
     public enum State implements ThreadStateTransitionValidator {
-
-        CREATED(1, 4), RUNNING(2, 4), PARTITIONS_REVOKED(2, 3, 4), PARTITIONS_ASSIGNED(1, 2, 4), PENDING_SHUTDOWN(5), DEAD;
+        CREATED(1, 4), RUNNING(2, 4), PARTITIONS_REVOKED(3, 4), PARTITIONS_ASSIGNED(1, 2, 4), PENDING_SHUTDOWN(5), DEAD;
 
         private final Set<Integer> validTransitions = new HashSet<>();
 
@@ -123,7 +130,7 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         }
 
         public boolean isRunning() {
-            return !equals(PENDING_SHUTDOWN) && !equals(CREATED) && !equals(DEAD);
+            return equals(RUNNING) || equals(PARTITIONS_REVOKED) || equals(PARTITIONS_ASSIGNED);
         }
 
         @Override
@@ -147,6 +154,74 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         void onChange(final Thread thread, final ThreadStateTransitionValidator newState, final ThreadStateTransitionValidator oldState);
     }
 
+    /**
+     * Set the {@link StreamThread.StateListener} to be notified when state changes. Note this API is internal to
+     * Kafka Streams and is not intended to be used by an external application.
+     */
+    public void setStateListener(final StreamThread.StateListener listener) {
+        stateListener = listener;
+    }
+
+    /**
+     * @return The state this instance is in
+     */
+    public State state() {
+        // we do not need to use the state lock since the variable is volatile
+        return state;
+    }
+
+    /**
+     * Sets the state
+     * @param newState New state
+     */
+    boolean setState(final State newState) {
+        final State oldState = state;
+
+        synchronized (stateLock) {
+            if (state == State.PENDING_SHUTDOWN && newState != State.DEAD) {
+                // when the state is already in PENDING_SHUTDOWN, all other transitions will be
+                // refused but we do not throw exception here
+                return false;
+            } else if (state == State.DEAD) {
+                // when the state is already in NOT_RUNNING, all its transitions
+                // will be refused but we do not throw exception here
+                return false;
+            } else if (state == State.PARTITIONS_REVOKED && newState == State.PARTITIONS_REVOKED) {
+                // when the state is already in PARTITIONS_REVOKED, its transition to itself will be
+                // refused but we do not throw exception here
+                return false;
+            } else if (!state.isValidTransition(newState)) {
+                log.error("{} Unexpected state transition from {} to {}", logPrefix, oldState, newState);
+                throw new StreamsException(logPrefix + " Unexpected state transition from " + oldState + " to " + newState);
+            } else {
+                log.info("{} State transition from {} to {}", logPrefix, oldState, newState);
+            }
+
+            state = newState;
+            if (newState == State.RUNNING) {
+                updateThreadMetadata(taskManager.activeTasks(), taskManager.standbyTasks());
+            } else {
+                updateThreadMetadata(null, null);
+            }
+        }
+
+        if (stateListener != null) {
+            stateListener.onChange(this, state, oldState);
+        }
+
+        return true;
+    }
+
+    public boolean isRunningAndNotRebalancing() {
+        // we do not need to grab stateLock since it is a single read
+        return state == State.RUNNING;
+    }
+
+    public boolean isRunning() {
+        synchronized (stateLock) {
+            return state == State.RUNNING || state == State.PARTITIONS_REVOKED || state == State.PARTITIONS_ASSIGNED;
+        }
+    }
 
     static class RebalanceListener implements ConsumerRebalanceListener {
         private final Time time;
@@ -166,20 +241,26 @@ public class StreamThread extends Thread implements ThreadDataProvider {
 
         @Override
         public void onPartitionsAssigned(final Collection<TopicPartition> assignment) {
+            log.debug("{} at state {}: partitions {} assigned at the end of consumer rebalance.\n" +
+                            "\tcurrent suspended active tasks: {}\n" +
+                            "\tcurrent suspended standby tasks: {}\n",
+                    logPrefix,
+                    streamThread.state,
+                    assignment,
+                    taskManager.suspendedActiveTaskIds(),
+                    taskManager.suspendedStandbyTaskIds());
+
             final long start = time.milliseconds();
             try {
                 if (!streamThread.setState(State.PARTITIONS_ASSIGNED)) {
                     return;
                 }
                 taskManager.createTasks(assignment);
-                final RuntimeException exception = streamThread.unAssignChangeLogPartitions();
-                if (exception != null) {
-                    throw exception;
-                }
                 streamThread.refreshMetadataState();
             } catch (final Throwable t) {
+                log.error("{} Error caught during partition assignment, " +
+                        "will abort the current process and re-throw at the end of rebalance: {}", logPrefix, t.getMessage());
                 streamThread.setRebalanceException(t);
-                throw t;
             } finally {
                 log.info("{} partition assignment took {} ms.\n" +
                                  "\tcurrent active tasks: {}\n" +
@@ -204,25 +285,27 @@ public class StreamThread extends Thread implements ThreadDataProvider {
                 taskManager.activeTaskIds(),
                 taskManager.standbyTaskIds());
 
-            final long start = time.milliseconds();
-            try {
-                streamThread.setState(State.PARTITIONS_REVOKED);
-                // suspend active tasks
-                taskManager.suspendTasksAndState();
-            } catch (final Throwable t) {
-                streamThread.setRebalanceException(t);
-                throw t;
-            } finally {
-                streamThread.refreshMetadataState();
-                streamThread.clearStandbyRecords();
+            if (streamThread.setState(State.PARTITIONS_REVOKED)) {
+                final long start = time.milliseconds();
+                try {
+                    // suspend active tasks
+                    taskManager.suspendTasksAndState();
+                } catch (final Throwable t) {
+                    log.error("{} Error caught during partition revocation, " +
+                            "will abort the current process and re-throw at the end of rebalance: {}", logPrefix, t.getMessage());
+                    streamThread.setRebalanceException(t);
+                } finally {
+                    streamThread.refreshMetadataState();
+                    streamThread.clearStandbyRecords();
 
-                log.info("{} partition revocation took {} ms.\n" +
-                        "\tsuspended active tasks: {}\n" +
-                        "\tsuspended standby tasks: {}",
-                    logPrefix,
-                    time.milliseconds() - start,
-                    taskManager.suspendedActiveTaskIds(),
-                    taskManager.suspendedStandbyTaskIds());
+                    log.info("{} partition revocation took {} ms.\n" +
+                                    "\tsuspended active tasks: {}\n" +
+                                    "\tsuspended standby tasks: {}",
+                            logPrefix,
+                            time.milliseconds() - start,
+                            taskManager.suspendedActiveTaskIds(),
+                            taskManager.suspendedStandbyTaskIds());
+                }
             }
         }
     }
@@ -449,29 +532,31 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         }
     }
 
-    private final Object stateLock = new Object();
-    private final StreamsMetadataState streamsMetadataState;
-    private final String logPrefix;
-    private final TaskManager taskManager;
     private final Time time;
     private final long pollTimeMs;
     private final long commitTimeMs;
-    private final PartitionGrouper partitionGrouper;
+    private final Object stateLock;
     private final UUID processId;
+    private final String clientId;
+    private final String logPrefix;
+    private final StreamsConfig config;
+    private final TaskManager taskManager;
     private final StateDirectory stateDirectory;
+    private final PartitionGrouper partitionGrouper;
     private final StreamsMetricsThreadImpl streamsMetrics;
+    private final StreamsMetadataState streamsMetadataState;
 
     private long lastCommitMs;
-    private String originalReset;
-    private ThreadMetadataProvider metadataProvider;
-    private boolean processStandbyRecords = false;
-    private Throwable rebalanceException;
-    private Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> standbyRecords = new HashMap<>();
-    private StreamThread.StateListener stateListener;
-    private volatile State state = State.CREATED;
     private long timerStartedMs;
+    private String originalReset;
+    private Throwable rebalanceException = null;
+    private boolean processStandbyRecords = false;
+    private volatile State state = State.CREATED;
+    private StreamThread.StateListener stateListener;
+    private ThreadMetadataProvider metadataProvider;
+    private Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> standbyRecords;
 
-    final StreamsConfig config;
+    // package-private for testing
     final ConsumerRebalanceListener rebalanceListener;
     final Consumer<byte[], byte[]> restoreConsumer;
 
@@ -479,7 +564,8 @@ public class StreamThread extends Thread implements ThreadDataProvider {
     protected final InternalTopologyBuilder builder;
 
     public final String applicationId;
-    public final String clientId;
+
+    private volatile ThreadMetadata threadMetadata;
 
     private final static int UNLIMITED_RECORDS = -1;
 
@@ -511,6 +597,8 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         this.stateDirectory = stateDirectory;
         this.rebalanceListener = new RebalanceListener(time, taskManager, this, logPrefix);
         this.config = config;
+        this.stateLock = new Object();
+        this.standbyRecords = new HashMap<>();
         this.partitionGrouper = config.getConfiguredInstance(StreamsConfig.PARTITION_GROUPER_CLASS_CONFIG, PartitionGrouper.class);
         log.info("{} Creating consumer client", logPrefix);
         final Map<String, Object> consumerConfigs = config.getConsumerConfigs(this, applicationId, threadClientId);
@@ -522,6 +610,7 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         }
         this.consumer = clientSupplier.getConsumer(consumerConfigs);
         taskManager.setConsumer(consumer);
+        updateThreadMetadata(null, null);
     }
 
     @SuppressWarnings("ConstantConditions")
@@ -557,8 +646,6 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         final Consumer<byte[], byte[]> restoreConsumer = clientSupplier.getRestoreConsumer(consumerConfigs);
         final StoreChangelogReader changelogReader = new StoreChangelogReader(threadClientId,
                                                                               restoreConsumer,
-                                                                              time,
-                                                                              config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
                                                                               stateRestoreListener);
 
         Producer<byte[], byte[]> threadProducer = null;
@@ -643,7 +730,7 @@ public class StreamThread extends Thread implements ThreadDataProvider {
             log.error("{} Encountered the following error during processing:", logPrefix, e);
             throw e;
         } finally {
-            shutdown(cleanRun);
+            completeShutdown(cleanRun);
         }
     }
 
@@ -658,10 +745,9 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         long recordsProcessedBeforeCommit = UNLIMITED_RECORDS;
         consumer.subscribe(builder.sourceTopicPattern(), rebalanceListener);
 
-        while (stillRunning()) {
+        while (isRunning()) {
             recordsProcessedBeforeCommit = runOnce(recordsProcessedBeforeCommit);
         }
-        log.info("{} Shutting down at user request", logPrefix);
     }
 
     // Visible for testing
@@ -940,24 +1026,13 @@ public class StreamThread extends Thread implements ThreadDataProvider {
 
     /**
      * Shutdown this stream thread.
+     *
      * Note that there is nothing to prevent this function from being called multiple times
      * (e.g., in testing), hence the state is set only the first time
      */
-    public synchronized void close() {
-        log.info("{} Informed thread to shut down", logPrefix);
+    public void shutdown() {
+        log.info("{} Informed to shut down", logPrefix);
         setState(State.PENDING_SHUTDOWN);
-    }
-
-    public boolean isInitialized() {
-        synchronized (stateLock) {
-            return state == State.RUNNING;
-        }
-    }
-
-    public boolean stillRunning() {
-        synchronized (stateLock) {
-            return state.isRunning();
-        }
     }
 
     public Map<TaskId, Task> tasks() {
@@ -1027,57 +1102,6 @@ public class StreamThread extends Thread implements ThreadDataProvider {
     }
 
     /**
-     * Set the {@link StreamThread.StateListener} to be notified when state changes. Note this API is internal to
-     * Kafka Streams and is not intended to be used by an external application.
-     */
-    public void setStateListener(final StreamThread.StateListener listener) {
-        stateListener = listener;
-    }
-
-    /**
-     * @return The state this instance is in
-     */
-    public State state() {
-        return state;
-    }
-
-
-    /**
-     * Sets the state
-     * @param newState New state
-     */
-
-    boolean setState(final State newState) {
-        State oldState;
-        synchronized (stateLock) {
-            oldState = state;
-
-            // there are cases when we shouldn't check if a transition is valid, e.g.,
-            // when, for testing, a thread is closed multiple times. We could either
-            // check here and immediately return for those cases, or add them to the transition
-            // diagram (but then the diagram would be confusing and have transitions like
-            // PENDING_SHUTDOWN->PENDING_SHUTDOWN).
-            // note we could be going from PENDING_SHUTDOWN to DEAD, and we obviously want to allow that
-            // transition, hence the check newState != DEAD.
-            if (newState != State.DEAD && (state == State.PENDING_SHUTDOWN || state == State.DEAD)) {
-                return false;
-            }
-            if (!state.isValidTransition(newState)) {
-                log.warn("{} Unexpected state transition from {} to {}.", logPrefix, oldState, newState);
-                throw new StreamsException(logPrefix + " Unexpected state transition from " + oldState + " to " + newState);
-            } else {
-                log.info("{} State transition from {} to {}.", logPrefix, oldState, newState);
-            }
-
-            state = newState;
-        }
-        if (stateListener != null) {
-            stateListener.onChange(this, state, oldState);
-        }
-        return true;
-    }
-
-    /**
      * Produces a string representation containing useful information about a StreamThread.
      * This is useful in debugging scenarios.
      * @return A string representation of the StreamThread instance.
@@ -1112,12 +1136,15 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         taskManager.setThreadMetadataProvider(metadataProvider);
     }
 
-    private void shutdown(final boolean cleanRun) {
+    private void completeShutdown(final boolean cleanRun) {
+        // set the state to pending shutdown first as it may be called due to error;
+        // its state may already be PENDING_SHUTDOWN so it will return false but we
+        // intentionally do not check the returned flag
         setState(State.PENDING_SHUTDOWN);
-        log.info("{} Shutting down", logPrefix);
-        setState(State.PENDING_SHUTDOWN);
-        taskManager.shutdown(cleanRun);
 
+        log.info("{} Shutting down", logPrefix);
+
+        taskManager.shutdown(cleanRun);
         try {
             consumer.close();
         } catch (final Throwable e) {
@@ -1128,22 +1155,10 @@ public class StreamThread extends Thread implements ThreadDataProvider {
         } catch (final Throwable e) {
             log.error("{} Failed to close restore consumer due to the following error:", logPrefix, e);
         }
-
-        log.info("{} Stream thread shutdown complete", logPrefix);
-        setState(State.DEAD);
         streamsMetrics.removeAllSensors();
-    }
 
-
-    private RuntimeException unAssignChangeLogPartitions() {
-        try {
-            // un-assign the change log partitions
-            restoreConsumer.assign(Collections.<TopicPartition>emptyList());
-        } catch (final RuntimeException e) {
-            log.error("{} Failed to un-assign change log partitions due to the following error:", logPrefix, e);
-            return e;
-        }
-        return null;
+        setState(State.DEAD);
+        log.info("{} Shutdown complete", logPrefix);
     }
 
     private void clearStandbyRecords() {
@@ -1152,5 +1167,30 @@ public class StreamThread extends Thread implements ThreadDataProvider {
 
     private void refreshMetadataState() {
         streamsMetadataState.onChange(metadataProvider.getPartitionsByHostState(), metadataProvider.clusterMetadata());
+    }
+
+    /**
+     * Return information about the current {@link StreamThread}.
+     *
+     * @return {@link ThreadMetadata}.
+     */
+    public final ThreadMetadata threadMetadata() {
+        return threadMetadata;
+    }
+
+    private void updateThreadMetadata(final Map<TaskId, Task> activeTasks, final Map<TaskId, Task> standbyTasks) {
+        final Set<TaskMetadata> activeTasksMetadata = new HashSet<>();
+        if (activeTasks != null) {
+            for (Map.Entry<TaskId, Task> task : activeTasks.entrySet()) {
+                activeTasksMetadata.add(new TaskMetadata(task.getKey().toString(), task.getValue().partitions()));
+            }
+        }
+        final Set<TaskMetadata> standbyTasksMetadata = new HashSet<>();
+        if (standbyTasks != null) {
+            for (Map.Entry<TaskId, Task> task : standbyTasks.entrySet()) {
+                standbyTasksMetadata.add(new TaskMetadata(task.getKey().toString(), task.getValue().partitions()));
+            }
+        }
+        threadMetadata = new ThreadMetadata(this.getName(), this.state().name(), activeTasksMetadata, standbyTasksMetadata);
     }
 }
