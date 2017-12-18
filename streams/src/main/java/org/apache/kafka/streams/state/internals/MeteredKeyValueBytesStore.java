@@ -95,14 +95,13 @@ public class MeteredKeyValueBytesStore<K, V> extends WrappedStateStore.AbstractS
         }, time);
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public void init(ProcessorContext context, StateStore root) {
         this.serdes = new StateSerdes<>(ProcessorStateManager.storeChangelogTopic(context.applicationId(), name()),
                                         keySerde == null ? (Serde<K>) context.keySerde() : keySerde,
                                         valueSerde == null ? (Serde<V>) context.valueSerde() : valueSerde);
         innerMetered.init(context, root);
-
-
     }
 
     @Override

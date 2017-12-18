@@ -56,7 +56,16 @@ class ChangeLoggingWindowBytesStore extends WrappedStateStore.AbstractStateStore
         return bytesStore.fetch(keyFrom, keyTo, from, to);
     }
 
-
+    @Override
+    public KeyValueIterator<Windowed<Bytes>, byte[]> all() {
+        return bytesStore.all();
+    }
+    
+    @Override
+    public KeyValueIterator<Windowed<Bytes>, byte[]> fetchAll(final long timeFrom, final long timeTo) {
+        return bytesStore.fetchAll(timeFrom, timeTo);
+    }
+    
     @Override
     public void put(final Bytes key, final byte[] value) {
         put(key, value, context.timestamp());
@@ -64,10 +73,8 @@ class ChangeLoggingWindowBytesStore extends WrappedStateStore.AbstractStateStore
 
     @Override
     public void put(final Bytes key, final byte[] value, final long timestamp) {
-        if (key != null) {
-            bytesStore.put(key, value, timestamp);
-            changeLogger.logChange(WindowStoreUtils.toBinaryKey(key, timestamp, maybeUpdateSeqnumForDups(), innerStateSerde), value);
-        }
+        bytesStore.put(key, value, timestamp);
+        changeLogger.logChange(WindowStoreUtils.toBinaryKey(key, timestamp, maybeUpdateSeqnumForDups(), innerStateSerde), value);
     }
 
     @Override

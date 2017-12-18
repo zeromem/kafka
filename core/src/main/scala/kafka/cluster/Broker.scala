@@ -21,8 +21,11 @@ import kafka.common.{BrokerEndPointNotAvailableException, BrokerNotAvailableExce
 import kafka.utils.Json
 import org.apache.kafka.common.Node
 import org.apache.kafka.common.network.ListenerName
-import org.apache.kafka.common.protocol.SecurityProtocol
+import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.Time
+
+import scala.collection.Map
+import scala.collection.JavaConverters._
 
 /**
  * A Kafka broker.
@@ -127,12 +130,12 @@ object Broker {
     }
   }
 
-  def toJson(version: Int, id: Int, host: String, port: Int, advertisedEndpoints: Seq[EndPoint], jmxPort: Int,
-             rack: Option[String]): String = {
+  def toJsonBytes(version: Int, id: Int, host: String, port: Int, advertisedEndpoints: Seq[EndPoint], jmxPort: Int,
+                  rack: Option[String]): Array[Byte] = {
     val jsonMap = collection.mutable.Map(VersionKey -> version,
       HostKey -> host,
       PortKey -> port,
-      EndpointsKey -> advertisedEndpoints.map(_.connectionString).toArray,
+      EndpointsKey -> advertisedEndpoints.map(_.connectionString).toBuffer.asJava,
       JmxPortKey -> jmxPort,
       TimestampKey -> Time.SYSTEM.milliseconds().toString
     )
@@ -141,10 +144,9 @@ object Broker {
     if (version >= 4) {
       jsonMap += (ListenerSecurityProtocolMapKey -> advertisedEndpoints.map { endPoint =>
         endPoint.listenerName.value -> endPoint.securityProtocol.name
-      }.toMap)
+      }.toMap.asJava)
     }
-
-    Json.encode(jsonMap)
+    Json.encodeAsBytes(jsonMap.asJava)
   }
 }
 

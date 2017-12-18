@@ -372,6 +372,7 @@ public class RocksDBStore<K, V> implements KeyValueStore<K, V> {
         // query rocksdb
         final RocksDBRangeIterator rocksDBRangeIterator = new RocksDBRangeIterator(name, db.newIterator(), serdes, from, to);
         openIterators.add(rocksDBRangeIterator);
+
         return rocksDBRangeIterator;
     }
 
@@ -384,6 +385,28 @@ public class RocksDBStore<K, V> implements KeyValueStore<K, V> {
         final RocksDbIterator rocksDbIterator = new RocksDbIterator(name, innerIter, serdes);
         openIterators.add(rocksDbIterator);
         return rocksDbIterator;
+    }
+
+    public synchronized KeyValue<K, V> first() {
+        validateStoreOpen();
+        
+        RocksIterator innerIter = db.newIterator();
+        innerIter.seekToFirst();
+        KeyValue<K, V> pair = new KeyValue<>(serdes.keyFrom(innerIter.key()), serdes.valueFrom(innerIter.value()));
+        innerIter.close();
+
+        return pair;
+    }
+
+    public synchronized KeyValue<K, V> last() {
+        validateStoreOpen();
+        
+        RocksIterator innerIter = db.newIterator();
+        innerIter.seekToLast();
+        KeyValue<K, V> pair = new KeyValue<>(serdes.keyFrom(innerIter.key()), serdes.valueFrom(innerIter.value()));
+        innerIter.close();
+
+        return pair;
     }
 
     /**

@@ -49,6 +49,7 @@ class CachingWindowStore<K, V> extends WrappedStateStore.AbstractStateStore impl
     private StateSerdes<K, V> serdes;
     private StateSerdes<Bytes, byte[]> bytesSerdes;
     private CacheFlushListener<Windowed<K>, V> flushListener;
+    private boolean sendOldValues;
     private final SegmentedCacheFunction cacheFunction;
 
     CachingWindowStore(final WindowStore<Bytes, byte[]> underlying,
@@ -110,16 +111,20 @@ class CachingWindowStore<K, V> extends WrappedStateStore.AbstractStateStore impl
             final RecordContext current = context.recordContext();
             context.setRecordContext(entry.recordContext());
             try {
+                final V oldValue = sendOldValues ? fetchPrevious(key, windowedKey.window().start()) : null;
                 flushListener.apply(windowedKey,
-                                    serdes.valueFrom(entry.newValue()), fetchPrevious(key, windowedKey.window().start()));
+                                    serdes.valueFrom(entry.newValue()), oldValue);
             } finally {
                 context.setRecordContext(current);
             }
         }
     }
 
-    public void setFlushListener(CacheFlushListener<Windowed<K>, V> flushListener) {
+    public void setFlushListener(final CacheFlushListener<Windowed<K>, V> flushListener,
+                                 final boolean sendOldValues) {
+
         this.flushListener = flushListener;
+        this.sendOldValues = sendOldValues;
     }
 
     @Override
@@ -145,7 +150,7 @@ class CachingWindowStore<K, V> extends WrappedStateStore.AbstractStateStore impl
         // since this function may not access the underlying inner store, we need to validate
         // if store is open outside as well.
         validateStoreOpen();
-
+        
         final Bytes keyBytes = WindowStoreUtils.toBinaryKey(key, timestamp, 0, bytesSerdes);
         final LRUCacheEntry entry = new LRUCacheEntry(value, true, context.offset(),
                                                       timestamp, context.partition(), context.topic());
@@ -201,7 +206,7 @@ class CachingWindowStore<K, V> extends WrappedStateStore.AbstractStateStore impl
             cacheFunction
         );
     }
-
+    
     private V fetchPrevious(final Bytes key, final long timestamp) {
         try (final WindowStoreIterator<byte[]> iter = underlying.fetch(key, timestamp, timestamp)) {
             if (!iter.hasNext()) {
@@ -211,5 +216,40 @@ class CachingWindowStore<K, V> extends WrappedStateStore.AbstractStateStore impl
             }
         }
     }
+    
+    @Override
+    public KeyValueIterator<Windowed<Bytes>, byte[]> all() {
+        validateStoreOpen();
 
+        final KeyValueIterator<Windowed<Bytes>, byte[]>  underlyingIterator = underlying.all();
+        final ThreadCache.MemoryLRUCacheBytesIterator cacheIterator = cache.all(name);
+
+        return new MergedSortedCacheWindowStoreKeyValueIterator(
+            cacheIterator,
+            underlyingIterator,
+            bytesSerdes,
+            windowSize,
+            cacheFunction
+        );
+    }
+    
+    @Override
+    public KeyValueIterator<Windowed<Bytes>, byte[]> fetchAll(final long timeFrom, final long timeTo) {
+        validateStoreOpen();
+        
+        final KeyValueIterator<Windowed<Bytes>, byte[]> underlyingIterator = underlying.fetchAll(timeFrom, timeTo);
+        final ThreadCache.MemoryLRUCacheBytesIterator cacheIterator = cache.all(name);
+        
+        final HasNextCondition hasNextCondition = keySchema.hasNextCondition(null, null, timeFrom, timeTo);
+        final PeekingKeyValueIterator<Bytes, LRUCacheEntry> filteredCacheIterator = new FilteredCacheIterator(cacheIterator,
+                                                                                                              hasNextCondition,
+                                                                                                              cacheFunction);
+        return new MergedSortedCacheWindowStoreKeyValueIterator(
+                filteredCacheIterator,
+                underlyingIterator,
+                bytesSerdes,
+                windowSize,
+                cacheFunction
+        );
+    }
 }

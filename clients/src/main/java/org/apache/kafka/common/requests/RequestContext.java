@@ -20,10 +20,9 @@ import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.Protocol;
-import org.apache.kafka.common.protocol.SecurityProtocol;
 import org.apache.kafka.common.protocol.types.Struct;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
@@ -76,17 +75,18 @@ public class RequestContext {
 
     public Send buildResponse(AbstractResponse body) {
         ResponseHeader responseHeader = header.toResponseHeader();
-        short version = header.apiVersion();
-
-        // Use v0 when serializing an unhandled ApiVersion response
-        if (isUnsupportedApiVersionsRequest())
-            version = 0;
-
-        return body.toSend(connectionId, responseHeader, version);
+        return body.toSend(connectionId, responseHeader, apiVersion());
     }
 
     private boolean isUnsupportedApiVersionsRequest() {
-        return header.apiKey() == API_VERSIONS && !Protocol.apiVersionSupported(API_VERSIONS.id, header.apiVersion());
+        return header.apiKey() == API_VERSIONS && !API_VERSIONS.isVersionSupported(header.apiVersion());
+    }
+
+    public short apiVersion() {
+        // Use v0 when serializing an unhandled ApiVersion response
+        if (isUnsupportedApiVersionsRequest())
+            return 0;
+        return header.apiVersion();
     }
 
 }

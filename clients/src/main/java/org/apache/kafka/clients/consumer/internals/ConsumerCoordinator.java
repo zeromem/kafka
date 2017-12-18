@@ -38,9 +38,7 @@ import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
-import org.apache.kafka.common.metrics.stats.Count;
 import org.apache.kafka.common.metrics.stats.Max;
-import org.apache.kafka.common.metrics.stats.Rate;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.JoinGroupRequest.ProtocolMetadata;
 import org.apache.kafka.common.requests.OffsetCommitRequest;
@@ -369,7 +367,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         // when these topics gets updated from metadata refresh.
         //
         // TODO: this is a hack and not something we want to support long-term unless we push regex into the protocol
-        //       we may need to modify the PartitionAssingor API to better support this case.
+        //       we may need to modify the PartitionAssignor API to better support this case.
         Set<String> assignedTopics = new HashSet<>();
         for (Assignment assigned : assignment.values()) {
             for (TopicPartition tp : assigned.partitions())
@@ -576,7 +574,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      * or an unrecoverable error is encountered.
      * @param offsets The offsets to be committed
      * @throws org.apache.kafka.common.errors.AuthorizationException if the consumer is not authorized to the group
-     *             or to any of the specified partitions
+     *             or to any of the specified partitions. See the exception for more details
      * @throws CommitFailedException if an unrecoverable error occurs before the commit can be completed
      * @return If the offset commit was successfully sent and a successful response was received from
      *         the coordinator
@@ -788,7 +786,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                         future.raise(new CommitFailedException());
                         return;
                     } else if (error == Errors.UNKNOWN_TOPIC_OR_PARTITION) {
-                        future.raise(new KafkaException("Partition " + tp + " may not exist or user may not have Describe access to topic"));
+                        future.raise(new KafkaException("Topic or Partition " + tp + " does not exist"));
                         return;
                     } else {
                         future.raise(new KafkaException("Unexpected error in commit: " + error.message()));
@@ -859,8 +857,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     log.debug("Failed to fetch offset for partition {}: {}", tp, error.message());
 
                     if (error == Errors.UNKNOWN_TOPIC_OR_PARTITION) {
-                        future.raise(new KafkaException("Partition " + tp + " may not exist or the user may not have " +
-                                "Describe access to the topic"));
+                        future.raise(new KafkaException("Topic or Partition " + tp + " does not exist"));
                     } else {
                         future.raise(new KafkaException("Unexpected error in fetch offset response: " + error.message()));
                     }
@@ -891,9 +888,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             this.commitLatency.add(metrics.metricName("commit-latency-max",
                 this.metricGrpName,
                 "The max time taken for a commit request"), new Max());
-            this.commitLatency.add(metrics.metricName("commit-rate",
-                this.metricGrpName,
-                "The number of commit calls per second"), new Rate(new Count()));
+            this.commitLatency.add(createMeter(metrics, metricGrpName, "commit", "commit calls"));
 
             Measurable numParts =
                 new Measurable() {

@@ -17,20 +17,33 @@
 package org.apache.kafka.streams;
 
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.errors.TopologyException;
+import org.apache.kafka.streams.kstream.ForeachAction;
 import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.internals.KStreamImpl;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.test.KStreamTestDriver;
 import org.apache.kafka.test.MockProcessorSupplier;
+import org.apache.kafka.test.TestUtils;
 import org.junit.Rule;
 import org.junit.Test;
 
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.Set;
 
+import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 public class StreamsBuilderTest {
 
@@ -41,7 +54,7 @@ public class StreamsBuilderTest {
 
     @Test(expected = TopologyException.class)
     public void testFrom() {
-        builder.stream("topic-1", "topic-2");
+        builder.stream(Arrays.asList("topic-1", "topic-2"));
 
         builder.build().addSource(KStreamImpl.SOURCE_NAME + "0000000000", "topic-3");
     }
@@ -83,7 +96,7 @@ public class StreamsBuilderTest {
         assertEquals(Utils.mkList("A:aa"), sourceProcessorSupplier.processed);
         assertEquals(Utils.mkList("A:aa"), throughProcessorSupplier.processed);
     }
-
+    
     @Test
     public void testMerge() {
         final String topic1 = "topic-1";
@@ -91,7 +104,7 @@ public class StreamsBuilderTest {
 
         final KStream<String, String> source1 = builder.stream(topic1);
         final KStream<String, String> source2 = builder.stream(topic2);
-        final KStream<String, String> merged = builder.merge(source1, source2);
+        final KStream<String, String> merged = source1.merge(source2);
 
         final MockProcessorSupplier<String, String> processorSupplier = new MockProcessorSupplier<>();
         merged.process(processorSupplier);
@@ -107,14 +120,79 @@ public class StreamsBuilderTest {
         assertEquals(Utils.mkList("A:aa", "B:bb", "C:cc", "D:dd"), processorSupplier.processed);
     }
 
+    @Test
+    public void shouldUseSerdesDefinedInMaterializedToConsumeTable() {
+        final Map<Long, String> results = new HashMap<>();
+        final String topic = "topic";
+        final ForeachAction<Long, String> action = new ForeachAction<Long, String>() {
+            @Override
+            public void apply(final Long key, final String value) {
+                results.put(key, value);
+            }
+        };
+        builder.table(topic, Materialized.<Long, String, KeyValueStore<Bytes, byte[]>>as("store")
+                .withKeySerde(Serdes.Long())
+                .withValueSerde(Serdes.String()))
+                .toStream().foreach(action);
+
+        driver.setUp(builder, TestUtils.tempDirectory());
+        driver.setTime(0L);
+        driver.process(topic, 1L, "value1");
+        driver.process(topic, 2L, "value2");
+        driver.flushState();
+        final KeyValueStore<Long, String> store = (KeyValueStore) driver.allStateStores().get("store");
+        assertThat(store.get(1L), equalTo("value1"));
+        assertThat(store.get(2L), equalTo("value2"));
+        assertThat(results.get(1L), equalTo("value1"));
+        assertThat(results.get(2L), equalTo("value2"));
+    }
+
+    @Test
+    public void shouldUseSerdesDefinedInMaterializedToConsumeGlobalTable() {
+        final String topic = "topic";
+        builder.globalTable(topic, Materialized.<Long, String, KeyValueStore<Bytes, byte[]>>as("store")
+                .withKeySerde(Serdes.Long())
+                .withValueSerde(Serdes.String()));
+        driver.setUp(builder, TestUtils.tempDirectory());
+        driver.setTime(0L);
+        driver.process(topic, 1L, "value1");
+        driver.process(topic, 2L, "value2");
+        driver.flushState();
+        final KeyValueStore<Long, String> store = (KeyValueStore) driver.allStateStores().get("store");
+        assertThat(store.get(1L), equalTo("value1"));
+        assertThat(store.get(2L), equalTo("value2"));
+    }
+
+    @Test
+    public void shouldUseDefaultNodeAndStoreNames() {
+        final String topic = "topic";
+        builder.table(topic,
+                Materialized.<Long, String, KeyValueStore<Bytes, byte[]>>with(Serdes.Long(), Serdes.String()));
+
+        final Iterator<TopologyDescription.Subtopology> subtopologies = builder.build().describe().subtopologies().iterator();
+        final TopologyDescription.Subtopology subtopology = subtopologies.next();
+
+        final Iterator<TopologyDescription.Node> nodes = subtopology.nodes().iterator();
+        TopologyDescription.Node node = nodes.next();
+        assertThat(node.name(), equalTo("KSTREAM-SOURCE-0000000001"));
+        node = nodes.next();
+        assertThat(node.name(), equalTo("KTABLE-SOURCE-0000000002"));
+        final Iterator<String> stores = ((TopologyDescription.Processor) node).stores().iterator();
+        assertThat(stores.next(), equalTo(topic + "-STATE-STORE-0000000000"));
+
+        assertFalse(nodes.hasNext());
+        assertFalse(stores.hasNext());
+        assertFalse(subtopologies.hasNext());
+    }
+    
     @Test(expected = TopologyException.class)
     public void shouldThrowExceptionWhenNoTopicPresent() throws Exception {
-        builder.stream();
+        builder.stream(Collections.<String>emptyList());
     }
 
     @Test(expected = NullPointerException.class)
     public void shouldThrowExceptionWhenTopicNamesAreNull() throws Exception {
-        builder.stream(Serdes.String(), Serdes.String(), null, null);
+        builder.stream(Arrays.<String>asList(null, null));
     }
 
     // TODO: these two static functions are added because some non-TopologyBuilder unit tests need to access the internal topology builder,

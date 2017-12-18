@@ -47,8 +47,8 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.header.Header
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.network.{ListenerName, Mode}
-import org.apache.kafka.common.protocol.SecurityProtocol
 import org.apache.kafka.common.record._
+import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArraySerializer, Serializer}
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.common.utils.Utils._
@@ -57,7 +57,6 @@ import org.apache.zookeeper.ZooDefs._
 import org.apache.zookeeper.data.ACL
 import org.junit.Assert._
 
-import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
 import scala.collection.{Map, mutable}
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
@@ -75,8 +74,10 @@ object TestUtils extends Logging {
 
   /** Port to use for unit tests that mock/don't require a real ZK server. */
   val MockZkPort = 1
-  /** Zookeeper connection string to use for unit tests that mock/don't require a real ZK server. */
+  /** ZooKeeper connection string to use for unit tests that mock/don't require a real ZK server. */
   val MockZkConnect = "127.0.0.1:" + MockZkPort
+  // CN in SSL certificates - this is used for endpoint validation when enabled
+  val SslCertificateCn = "localhost"
 
   private val transactionStatusKey = "transactionStatus"
   private val committedValue : Array[Byte] = "committed".getBytes(StandardCharsets.UTF_8)
@@ -274,7 +275,7 @@ object TestUtils extends Logging {
   }
 
   /**
-   * Create a topic in zookeeper.
+   * Create a topic in ZooKeeper.
    * Wait until the leader is elected and the metadata is propagated to all brokers.
    * Return the leader for each partition.
    */
@@ -294,7 +295,7 @@ object TestUtils extends Logging {
   }
 
   /**
-   * Create a topic in zookeeper using a customized replica assignment.
+   * Create a topic in ZooKeeper using a customized replica assignment.
    * Wait until the leader is elected and the metadata is propagated to all brokers.
    * Return the leader for each partition.
    */
@@ -520,14 +521,15 @@ object TestUtils extends Logging {
     new Producer[K, V](new kafka.producer.ProducerConfig(props))
   }
 
-  private def securityConfigs(mode: Mode,
+  def securityConfigs(mode: Mode,
                               securityProtocol: SecurityProtocol,
                               trustStoreFile: Option[File],
                               certAlias: String,
+                              certCn: String,
                               saslProperties: Option[Properties]): Properties = {
     val props = new Properties
     if (usesSslTransportLayer(securityProtocol))
-      props ++= sslConfigs(mode, securityProtocol == SecurityProtocol.SSL, trustStoreFile, certAlias)
+      props ++= sslConfigs(mode, securityProtocol == SecurityProtocol.SSL, trustStoreFile, certAlias, certCn)
 
     if (usesSaslAuthentication(securityProtocol))
       props ++= JaasTestUtils.saslConfigs(saslProperties)
@@ -536,7 +538,7 @@ object TestUtils extends Logging {
   }
 
   def producerSecurityConfigs(securityProtocol: SecurityProtocol, trustStoreFile: Option[File], saslProperties: Option[Properties]): Properties =
-    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "producer", saslProperties)
+    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "producer", SslCertificateCn, saslProperties)
 
   /**
    * Create a (new) producer with a few pre-configured properties.
@@ -597,10 +599,10 @@ object TestUtils extends Logging {
   }
 
   def consumerSecurityConfigs(securityProtocol: SecurityProtocol, trustStoreFile: Option[File], saslProperties: Option[Properties]): Properties =
-    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "consumer", saslProperties)
+    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "consumer", SslCertificateCn, saslProperties)
 
   def adminClientSecurityConfigs(securityProtocol: SecurityProtocol, trustStoreFile: Option[File], saslProperties: Option[Properties]): Properties =
-    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "admin-client", saslProperties)
+    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "admin-client", SslCertificateCn, saslProperties)
 
   /**
    * Create a new consumer with a few pre-configured properties.
@@ -837,8 +839,8 @@ object TestUtils extends Logging {
         return
       } catch {
         case e: AssertionError =>
-          val ellapsed = System.currentTimeMillis - startTime
-          if(ellapsed > maxWaitMs) {
+          val elapsed = System.currentTimeMillis - startTime
+          if (elapsed > maxWaitMs) {
             throw e
           } else {
             info("Attempt failed, sleeping for " + wait + ", and then retrying.")
@@ -1020,7 +1022,7 @@ object TestUtils extends Logging {
   /**
    * Create new LogManager instance with default configuration for testing
    */
-  def createLogManager(logDirs: Array[File] = Array.empty[File],
+  def createLogManager(logDirs: Seq[File] = Seq.empty[File],
                        defaultConfig: LogConfig = LogConfig(),
                        cleanerConfig: CleanerConfig = CleanerConfig(enableCleaner = false),
                        time: MockTime = new MockTime()): LogManager = {
@@ -1173,7 +1175,7 @@ object TestUtils extends Logging {
     TestUtils.waitUntilTrue(() =>
       servers.forall(server => topicPartitions.forall(tp => server.replicaManager.getPartition(tp).isEmpty)),
       "Replica manager's should have deleted all of this topic's partitions")
-    // ensure that logs from all replicas are deleted if delete topic is marked successful in zookeeper
+    // ensure that logs from all replicas are deleted if delete topic is marked successful in ZooKeeper
     assertTrue("Replica logs not deleted after delete topic is complete",
       servers.forall(server => topicPartitions.forall(tp => server.getLogManager.getLog(tp).isEmpty)))
     // ensure that topic is removed from all cleaner offsets
@@ -1221,12 +1223,13 @@ object TestUtils extends Logging {
     copy
   }
 
-  def sslConfigs(mode: Mode, clientCert: Boolean, trustStoreFile: Option[File], certAlias: String): Properties = {
+  def sslConfigs(mode: Mode, clientCert: Boolean, trustStoreFile: Option[File], certAlias: String,
+                 certCn: String = SslCertificateCn): Properties = {
     val trustStore = trustStoreFile.getOrElse {
       throw new Exception("SSL enabled but no trustStoreFile provided")
     }
 
-    val sslConfigs = TestSslUtils.createSslConfig(clientCert, true, mode, trustStore, certAlias)
+    val sslConfigs = TestSslUtils.createSslConfig(clientCert, true, mode, trustStore, certAlias, certCn)
 
     val sslProps = new Properties()
     sslConfigs.asScala.foreach { case (k, v) => sslProps.put(k, v) }
@@ -1358,10 +1361,14 @@ object TestUtils extends Logging {
 
   }
 
-  def consumeTopicRecords[K, V](servers: Seq[KafkaServer], topic: String, numMessages: Int,
+  def consumeTopicRecords[K, V](servers: Seq[KafkaServer],
+                                topic: String,
+                                numMessages: Int,
+                                securityProtocol: SecurityProtocol = SecurityProtocol.PLAINTEXT,
+                                trustStoreFile: Option[File] = None,
                                 waitTime: Long = JTestUtils.DEFAULT_MAX_WAIT_MS): Seq[ConsumerRecord[Array[Byte], Array[Byte]]] = {
-    val consumer = createNewConsumer(TestUtils.getBrokerListStrFromServers(servers),
-      securityProtocol = SecurityProtocol.PLAINTEXT)
+    val consumer = createNewConsumer(TestUtils.getBrokerListStrFromServers(servers, securityProtocol),
+      securityProtocol = securityProtocol, trustStoreFile = trustStoreFile)
     try {
       consumer.subscribe(Collections.singleton(topic))
       consumeRecords(consumer, numMessages, waitTime)
@@ -1379,11 +1386,32 @@ object TestUtils extends Logging {
     records
   }
 
-  def createTransactionalProducer(transactionalId: String, servers: Seq[KafkaServer]) = {
+  /**
+    * Will consume all the records for the given consumer for the specified duration. If you want to drain all the
+    * remaining messages in the partitions the consumer is subscribed to, the duration should be set high enough so
+    * that the consumer has enough time to poll everything. This would be based on the number of expected messages left
+    * in the topic, and should not be too large (ie. more than a second) in our tests.
+    *
+    * @return All the records consumed by the consumer within the specified duration.
+    */
+  def consumeRecordsFor[K, V](consumer: KafkaConsumer[K, V], duration: Long): Seq[ConsumerRecord[K, V]] = {
+    val startTime = System.currentTimeMillis()
+    val records = new ArrayBuffer[ConsumerRecord[K, V]]()
+    waitUntilTrue(() => {
+      records ++= consumer.poll(50).asScala
+      System.currentTimeMillis() - startTime > duration
+    }, s"The timeout $duration was greater than the maximum wait time.")
+    records
+  }
+
+  def createTransactionalProducer(transactionalId: String, servers: Seq[KafkaServer], batchSize: Int = 16384,
+                                  transactionTimeoutMs: Long = 60000) = {
     val props = new Properties()
     props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
-    props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "1")
+    props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "5")
     props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
+    props.put(ProducerConfig.BATCH_SIZE_CONFIG, batchSize.toString)
+    props.put(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, transactionTimeoutMs.toString)
     TestUtils.createNewProducer(TestUtils.getBrokerListStrFromServers(servers), retries = Integer.MAX_VALUE, acks = -1, props = Some(props))
   }
 
@@ -1407,11 +1435,11 @@ object TestUtils extends Logging {
 
   private def asBytes(string: String) = string.getBytes(StandardCharsets.UTF_8)
 
-  // Verifies that the record was intended to be committed by checking the the headers for an expected transaction status
+  // Verifies that the record was intended to be committed by checking the headers for an expected transaction status
   // If true, this will return the value as a string. It is expected that the record in question should have been created
   // by the `producerRecordWithExpectedTransactionStatus` method.
   def assertCommittedAndGetValue(record: ConsumerRecord[Array[Byte], Array[Byte]]) : String = {
-    record.headers.headers(transactionStatusKey).headOption match {
+    record.headers.headers(transactionStatusKey).asScala.headOption match {
       case Some(header) =>
         assertEquals(s"Got ${asString(header.value)} but expected the value to indicate " +
           s"committed status.", asString(committedValue), asString(header.value))
@@ -1433,7 +1461,7 @@ object TestUtils extends Logging {
       else
         abortedValue
     }
-    new ProducerRecord[Array[Byte], Array[Byte]](topic, null, key, value, List(header))
+    new ProducerRecord[Array[Byte], Array[Byte]](topic, null, key, value, Collections.singleton(header))
   }
 
   def producerRecordWithExpectedTransactionStatus(topic: String, key: String, value: String,
@@ -1444,7 +1472,7 @@ object TestUtils extends Logging {
   // Collect the current positions for all partition in the consumers current assignment.
   def consumerPositions(consumer: KafkaConsumer[Array[Byte], Array[Byte]]) : Map[TopicPartition, OffsetAndMetadata]  = {
     val offsetsToCommit = new mutable.HashMap[TopicPartition, OffsetAndMetadata]()
-    consumer.assignment.foreach{ topicPartition =>
+    consumer.assignment.asScala.foreach { topicPartition =>
       offsetsToCommit.put(topicPartition, new OffsetAndMetadata(consumer.position(topicPartition)))
     }
     offsetsToCommit.toMap
@@ -1453,14 +1481,14 @@ object TestUtils extends Logging {
   def pollUntilAtLeastNumRecords(consumer: KafkaConsumer[Array[Byte], Array[Byte]], numRecords: Int): Seq[ConsumerRecord[Array[Byte], Array[Byte]]] = {
     val records = new ArrayBuffer[ConsumerRecord[Array[Byte], Array[Byte]]]()
     TestUtils.waitUntilTrue(() => {
-      records ++= consumer.poll(50)
+      records ++= consumer.poll(50).asScala
       records.size >= numRecords
     }, s"Consumed ${records.size} records until timeout, but expected $numRecords records.")
     records
   }
 
   def resetToCommittedPositions(consumer: KafkaConsumer[Array[Byte], Array[Byte]]) = {
-    consumer.assignment.foreach { case(topicPartition) =>
+    consumer.assignment.asScala.foreach { case(topicPartition) =>
       val offset = consumer.committed(topicPartition)
       if (offset != null)
         consumer.seek(topicPartition, offset.offset)
@@ -1475,8 +1503,32 @@ object TestUtils extends Logging {
   def grabConsoleOutput(f: => Unit) : String = {
     val out = new ByteArrayOutputStream
     try scala.Console.withOut(out)(f)
-    finally scala.Console.out.flush
+    finally scala.Console.out.flush()
     out.toString
+  }
+
+  /**
+   * Capture the console error during the execution of the provided function.
+   */
+  def grabConsoleError(f: => Unit) : String = {
+    val err = new ByteArrayOutputStream
+    try scala.Console.withErr(err)(f)
+    finally scala.Console.err.flush()
+    err.toString
+  }
+
+  /**
+   * Capture both the console output and console error during the execution of the provided function.
+   */
+  def grabConsoleOutputAndError(f: => Unit) : (String, String) = {
+    val out = new ByteArrayOutputStream
+    val err = new ByteArrayOutputStream
+    try scala.Console.withOut(out)(scala.Console.withErr(err)(f))
+    finally {
+      scala.Console.out.flush()
+      scala.Console.err.flush()
+    }
+    (out.toString, err.toString)
   }
 
 }

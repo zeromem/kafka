@@ -22,8 +22,6 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.StreamsMetrics;
 import org.apache.kafka.streams.processor.TaskId;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -36,14 +34,12 @@ import java.util.Map;
  */
 public class StandbyTask extends AbstractTask {
 
-    private static final Logger log = LoggerFactory.getLogger(StandbyTask.class);
     private Map<TopicPartition, Long> checkpointedOffsets = new HashMap<>();
 
     /**
      * Create {@link StandbyTask} with its assigned partitions
      *
      * @param id             the ID of this task
-     * @param applicationId  the ID of the stream processing application
      * @param partitions     the collection of assigned {@link TopicPartition}
      * @param topology       the instance of {@link ProcessorTopology}
      * @param consumer       the instance of {@link Consumer}
@@ -52,7 +48,6 @@ public class StandbyTask extends AbstractTask {
      * @param stateDirectory the {@link StateDirectory} created by the thread
      */
     StandbyTask(final TaskId id,
-                final String applicationId,
                 final Collection<TopicPartition> partitions,
                 final ProcessorTopology topology,
                 final Consumer<byte[], byte[]> consumer,
@@ -60,10 +55,19 @@ public class StandbyTask extends AbstractTask {
                 final StreamsConfig config,
                 final StreamsMetrics metrics,
                 final StateDirectory stateDirectory) {
-        super(id, applicationId, partitions, topology, consumer, changelogReader, true, stateDirectory, config);
+        super(id, partitions, topology, consumer, changelogReader, true, stateDirectory, config);
 
         // initialize the topology with its own context
-        processorContext = new StandbyContextImpl(id, applicationId, config, stateMgr, metrics);
+        processorContext = new StandbyContextImpl(id, config, stateMgr, metrics);
+    }
+
+    @Override
+    public boolean initialize() {
+        initializeStateStores();
+        checkpointedOffsets = Collections.unmodifiableMap(stateMgr.checkpointed());
+        processorContext.initialized();
+        taskInitialized = true;
+        return true;
     }
 
     /**
@@ -73,7 +77,7 @@ public class StandbyTask extends AbstractTask {
      */
     @Override
     public void resume() {
-        log.debug("{} Resuming", logPrefix);
+        log.debug("Resuming");
         updateOffsetLimits();
     }
 
@@ -86,7 +90,7 @@ public class StandbyTask extends AbstractTask {
      */
     @Override
     public void commit() {
-        log.trace("{} Committing", logPrefix);
+        log.trace("Committing");
         flushAndCheckpointState();
         // reinitialize offset limits
         updateOffsetLimits();
@@ -100,7 +104,7 @@ public class StandbyTask extends AbstractTask {
      */
     @Override
     public void suspend() {
-        log.debug("{} Suspending", logPrefix);
+        log.debug("Suspending");
         flushAndCheckpointState();
     }
 
@@ -124,11 +128,13 @@ public class StandbyTask extends AbstractTask {
         if (!taskInitialized) {
             return;
         }
-        log.debug("{} Closing", logPrefix);
+        log.debug("Closing");
         boolean committedSuccessfully = false;
         try {
-            commit();
-            committedSuccessfully = true;
+            if (clean) {
+                commit();
+                committedSuccessfully = true;
+            }
         } finally {
             closeStateManager(committedSuccessfully);
         }
@@ -141,21 +147,6 @@ public class StandbyTask extends AbstractTask {
         close(clean, isZombie);
     }
 
-    @Override
-    public boolean maybePunctuateStreamTime() {
-        throw new UnsupportedOperationException("maybePunctuateStreamTime not supported by StandbyTask");
-    }
-
-    @Override
-    public boolean maybePunctuateSystemTime() {
-        throw new UnsupportedOperationException("maybePunctuateSystemTime not supported by StandbyTask");
-    }
-
-    @Override
-    public boolean commitNeeded() {
-        return false;
-    }
-
     /**
      * Updates a state store using records from one change log partition
      *
@@ -163,30 +154,12 @@ public class StandbyTask extends AbstractTask {
      */
     public List<ConsumerRecord<byte[], byte[]>> update(final TopicPartition partition,
                                                        final List<ConsumerRecord<byte[], byte[]>> records) {
-        log.trace("{} Updating standby replicas of its state store for partition [{}]", logPrefix, partition);
+        log.trace("Updating standby replicas of its state store for partition [{}]", partition);
         return stateMgr.updateStandbyStates(partition, records);
-    }
-
-    @Override
-    public int addRecords(final TopicPartition partition, final Iterable<ConsumerRecord<byte[], byte[]>> records) {
-        throw new UnsupportedOperationException("add records not supported by StandbyTasks");
     }
 
     public Map<TopicPartition, Long> checkpointedOffsets() {
         return checkpointedOffsets;
-    }
-
-    @Override
-    public boolean process() {
-        throw new UnsupportedOperationException("process not supported by StandbyTasks");
-    }
-
-    public boolean initialize() {
-        initializeStateStores();
-        checkpointedOffsets = Collections.unmodifiableMap(stateMgr.checkpointed());
-        processorContext.initialized();
-        taskInitialized = true;
-        return true;
     }
 
 }

@@ -57,7 +57,7 @@ public class MeteredWindowStore<K, V> extends WrappedStateStore.AbstractStateSto
         this.valueSerde = valueSerde;
     }
 
-
+    @SuppressWarnings("unchecked")
     @Override
     public void init(final ProcessorContext context, final StateStore root) {
         this.context = context;
@@ -112,6 +112,20 @@ public class MeteredWindowStore<K, V> extends WrappedStateStore.AbstractStateSto
                                                 time);
     }
 
+    @Override
+    public KeyValueIterator<Windowed<K>, V> all() {
+        return new MeteredWindowedKeyValueIterator<>(inner.all(), fetchTime, metrics, serdes, time);
+    }
+    
+    @Override
+    public KeyValueIterator<Windowed<K>, V> fetchAll(final long timeFrom, final long timeTo) {
+        return new MeteredWindowedKeyValueIterator<>(inner.fetchAll(timeFrom, timeTo), 
+                                                     fetchTime, 
+                                                     metrics, 
+                                                     serdes, 
+                                                     time);
+    }
+    
     @Override
     public KeyValueIterator<Windowed<K>, V> fetch(final K from, final K to, final long timeFrom, final long timeTo) {
         return new MeteredWindowedKeyValueIterator<>(inner.fetch(keyBytes(from), keyBytes(to), timeFrom, timeTo),

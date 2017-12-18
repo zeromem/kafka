@@ -110,7 +110,13 @@ public class StandaloneHerder extends AbstractHerder {
         if (!configState.contains(connector))
             return null;
         Map<String, String> config = configState.connectorConfig(connector);
-        return new ConnectorInfo(connector, config, configState.tasks(connector));
+        return new ConnectorInfo(connector, config, configState.tasks(connector),
+            connectorTypeForClass(config.get(ConnectorConfig.CONNECTOR_CLASS_CONFIG)));
+    }
+
+    @Override
+    protected Map<String, String> config(String connName) {
+        return configState.connectorConfig(connName);
     }
 
     @Override
@@ -249,19 +255,11 @@ public class StandaloneHerder extends AbstractHerder {
     private List<Map<String, String>> recomputeTaskConfigs(String connName) {
         Map<String, String> config = configState.connectorConfig(connName);
 
-        ConnectorConfig connConfig;
-        if (worker.isSinkConnector(connName)) {
-            connConfig = new SinkConnectorConfig(plugins(), config);
-            return worker.connectorTaskConfigs(connName,
-                                               connConfig.getInt(ConnectorConfig.TASKS_MAX_CONFIG),
-                                               connConfig.getList(SinkConnectorConfig.TOPICS_CONFIG));
-        } else {
-            connConfig = new SourceConnectorConfig(plugins(), config);
-            return worker.connectorTaskConfigs(connName,
-                                               connConfig.getInt(ConnectorConfig.TASKS_MAX_CONFIG),
-                                               null);
-        }
+        ConnectorConfig connConfig = worker.isSinkConnector(connName) ?
+            new SinkConnectorConfig(plugins(), config) :
+            new SourceConnectorConfig(plugins(), config);
 
+        return worker.connectorTaskConfigs(connName, connConfig);
     }
 
     private void createConnectorTasks(String connName, TargetState initialState) {

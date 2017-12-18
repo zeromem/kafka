@@ -75,7 +75,7 @@ public class SmokeTestDriver extends SmokeTestUtil {
     }
 
     // This main() is not used by the system test. It is intended to be used for local debugging.
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) throws InterruptedException {
         final String kafka = "localhost:9092";
         final File stateDir = TestUtils.tempDirectory();
 
@@ -129,7 +129,7 @@ public class SmokeTestDriver extends SmokeTestUtil {
         System.out.println("shutdown");
     }
 
-    public static Map<String, Set<Integer>> generate(String kafka, final int numKeys, final int maxRecordsPerKey) throws Exception {
+    public static Map<String, Set<Integer>> generate(String kafka, final int numKeys, final int maxRecordsPerKey) {
         final Properties producerProps = new Properties();
         producerProps.put(ProducerConfig.CLIENT_ID_CONFIG, "SmokeTest");
         producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka);
@@ -139,6 +139,7 @@ public class SmokeTestDriver extends SmokeTestUtil {
         // no duplicates
         producerProps.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);
         producerProps.put(ProducerConfig.ACKS_CONFIG, "all");
+        producerProps.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 80000);
 
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProps);
 
