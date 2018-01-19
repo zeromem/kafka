@@ -191,7 +191,7 @@ import java.util.regex.Pattern;
  * demonstrate how to use them.
  *
  * <h4>Automatic Offset Committing</h4>
- * This example demonstrates a simple usage of Kafka's consumer api that relying on automatic offset committing.
+ * This example demonstrates a simple usage of Kafka's consumer api that relies on automatic offset committing.
  * <p>
  * <pre>
  *     Properties props = new Properties();
@@ -579,7 +579,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * either strings or objects of the appropriate type (for example a numeric configuration would accept either the
      * string "42" or the integer 42).
      * <p>
-     * Valid configuration strings are documented at {@link ConsumerConfig}
+     * Valid configuration strings are documented at {@link ConsumerConfig}.
+     * <p>
+     * Note: after creating a {@code KafkaConsumer} you must always {@link #close()} it to avoid resource leaks.
      *
      * @param configs The consumer configs
      */
@@ -590,7 +592,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * A consumer is instantiated by providing a set of key-value pairs as configuration, and a key and a value {@link Deserializer}.
      * <p>
-     * Valid configuration strings are documented at {@link ConsumerConfig}
+     * Valid configuration strings are documented at {@link ConsumerConfig}.
+     * <p>
+     * Note: after creating a {@code KafkaConsumer} you must always {@link #close()} it to avoid resource leaks.
      *
      * @param configs The consumer configs
      * @param keyDeserializer The deserializer for key that implements {@link Deserializer}. The configure() method
@@ -609,7 +613,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * A consumer is instantiated by providing a {@link java.util.Properties} object as configuration.
      * <p>
-     * Valid configuration strings are documented at {@link ConsumerConfig}
+     * Valid configuration strings are documented at {@link ConsumerConfig}.
+     * <p>
+     * Note: after creating a {@code KafkaConsumer} you must always {@link #close()} it to avoid resource leaks.
      *
      * @param properties The consumer configuration properties
      */
@@ -621,7 +627,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * A consumer is instantiated by providing a {@link java.util.Properties} object as configuration, and a
      * key and a value {@link Deserializer}.
      * <p>
-     * Valid configuration strings are documented at {@link ConsumerConfig}
+     * Valid configuration strings are documented at {@link ConsumerConfig}.
+     * <p>
+     * Note: after creating a {@code KafkaConsumer} you must always {@link #close()} it to avoid resource leaks.
      *
      * @param properties The consumer configuration properties
      * @param keyDeserializer The deserializer for key that implements {@link Deserializer}. The configure() method

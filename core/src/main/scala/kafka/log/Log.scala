@@ -425,7 +425,7 @@ class Log(@volatile var dir: File,
   private def recoverLog(): Long = {
     // if we have the clean shutdown marker, skip recovery
     if (!hasCleanShutdownFile) {
-      // okay we need to actually recovery this log
+      // okay we need to actually recover this log
       val unflushed = logSegments(this.recoveryPoint, Long.MaxValue).iterator
       while (unflushed.hasNext) {
         val segment = unflushed.next
@@ -1226,12 +1226,14 @@ class Log(@volatile var dir: File,
         false
       }
     }
+
     deleteOldSegments(shouldDelete, reason = s"retention size in bytes ${config.retentionSize} breach")
   }
 
   private def deleteLogStartOffsetBreachedSegments(): Int = {
     def shouldDelete(segment: LogSegment, nextSegmentOpt: Option[LogSegment]) =
       nextSegmentOpt.exists(_.baseOffset <= logStartOffset)
+
     deleteOldSegments(shouldDelete, reason = s"log start offset $logStartOffset breach")
   }
 
@@ -1566,7 +1568,7 @@ class Log(@volatile var dir: File,
    * @param segment The log segment to schedule for deletion
    */
   private def deleteSegment(segment: LogSegment) {
-    info("Scheduling log segment %d for log %s for deletion.".format(segment.baseOffset, name))
+    info(s"Scheduling log segment [baseOffset ${segment.baseOffset}, size ${segment.size}] for log $name for deletion.")
     lock synchronized {
       segments.remove(segment.baseOffset)
       asyncDeleteSegment(segment)
