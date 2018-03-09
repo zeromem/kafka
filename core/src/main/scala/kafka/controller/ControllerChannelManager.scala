@@ -17,7 +17,7 @@
 package kafka.controller
 
 import java.net.SocketTimeoutException
-import java.util.concurrent.{BlockingQueue, LinkedBlockingQueue}
+import java.util.concurrent.{BlockingQueue, LinkedBlockingQueue, TimeUnit}
 
 import com.yammer.metrics.core.Gauge
 import kafka.api._
@@ -36,7 +36,6 @@ import org.apache.kafka.common.security.JaasContext
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.{LogContext, Time}
 import org.apache.kafka.common.{Node, TopicPartition}
-import org.slf4j.event.Level
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.HashMap
@@ -213,13 +212,13 @@ class RequestSendThread(val controllerId: Int,
 
   override def doWork(): Unit = {
 
-    def backoff(): Unit = CoreUtils.swallow(Thread.sleep(100), this, Level.TRACE)
+    def backoff(): Unit = pause(100, TimeUnit.MILLISECONDS)
 
     val QueueItem(apiKey, requestBuilder, callback) = queue.take()
     var clientResponse: ClientResponse = null
     try {
       var isSendSuccessful = false
-      while (isRunning.get() && !isSendSuccessful) {
+      while (isRunning && !isSendSuccessful) {
         // if a broker goes down for a long time, then at some point the controller's zookeeper listener will trigger a
         // removeBroker which will invoke shutdown() on this thread. At that point, we will stop retrying.
         try {
@@ -375,20 +374,14 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
       }
     }
 
-    val filteredPartitions = {
-      val givenPartitions = if (partitions.isEmpty)
-        controllerContext.partitionLeadershipInfo.keySet
-      else
-        partitions
-      if (controller.topicDeletionManager.partitionsToBeDeleted.isEmpty)
-        givenPartitions
-      else
-        givenPartitions -- controller.topicDeletionManager.partitionsToBeDeleted
-    }
+    val givenPartitions = if (partitions.isEmpty)
+      controllerContext.partitionLeadershipInfo.keySet
+    else
+      partitions
 
     updateMetadataRequestBrokerSet ++= brokerIds.filter(_ >= 0)
-    filteredPartitions.foreach(partition => updateMetadataRequestPartitionInfo(partition, beingDeleted = false))
-    controller.topicDeletionManager.partitionsToBeDeleted.foreach(partition => updateMetadataRequestPartitionInfo(partition, beingDeleted = true))
+    givenPartitions.foreach(partition => updateMetadataRequestPartitionInfo(partition,
+      beingDeleted = controller.topicDeletionManager.partitionsToBeDeleted.contains(partition)))
   }
 
   def sendRequestsToBrokers(controllerEpoch: Int) {

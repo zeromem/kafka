@@ -99,7 +99,7 @@ abstract class AssignedTasks<T extends Task> {
         for (final Iterator<Map.Entry<TaskId, T>> it = created.entrySet().iterator(); it.hasNext(); ) {
             final Map.Entry<TaskId, T> entry = it.next();
             try {
-                if (!entry.getValue().initialize()) {
+                if (!entry.getValue().initializeStateStores()) {
                     log.debug("Transitioning {} {} to restoring", taskTypeName, entry.getKey());
                     addToRestoring(entry.getValue());
                 } else {
@@ -200,6 +200,8 @@ abstract class AssignedTasks<T extends Task> {
                 suspended.put(task.id(), task);
             } catch (final TaskMigratedException closeAsZombieAndSwallow) {
                 // as we suspend a task, we are either shutting down or rebalancing, thus, we swallow and move on
+                log.info("Failed to suspend {} {} since it got migrated to another thread already. " +
+                        "Closing it as zombie and move on.", taskTypeName, task.id());
                 firstException.compareAndSet(null, closeZombieTask(task));
                 it.remove();
             } catch (final RuntimeException e) {
@@ -216,7 +218,6 @@ abstract class AssignedTasks<T extends Task> {
     }
 
     RuntimeException closeZombieTask(final T task) {
-        log.warn("{} {} got migrated to another thread already. Closing it as zombie.", taskTypeName, task.id());
         try {
             task.close(false, true);
         } catch (final RuntimeException e) {
@@ -242,11 +243,12 @@ abstract class AssignedTasks<T extends Task> {
                 try {
                     task.resume();
                 } catch (final TaskMigratedException e) {
+                    log.info("Failed to resume {} {} since it got migrated to another thread already. " +
+                            "Closing it as zombie before triggering a new rebalance.", taskTypeName, task.id());
                     final RuntimeException fatalException = closeZombieTask(task);
                     if (fatalException != null) {
                         throw fatalException;
                     }
-                    suspended.remove(taskId);
                     throw e;
                 }
                 transitionToRunning(task, new HashSet<TopicPartition>());
@@ -272,6 +274,7 @@ abstract class AssignedTasks<T extends Task> {
     private void transitionToRunning(final T task, final Set<TopicPartition> readyPartitions) {
         log.debug("transitioning {} {} to running", taskTypeName, task.id());
         running.put(task.id(), task);
+        task.initializeTopology();
         for (TopicPartition topicPartition : task.partitions()) {
             runningByPartition.put(topicPartition, task);
             if (task.hasStateStores()) {
@@ -367,14 +370,14 @@ abstract class AssignedTasks<T extends Task> {
             try {
                 action.apply(task);
             } catch (final TaskMigratedException e) {
+                log.info("Failed to commit {} {} since it got migrated to another thread already. " +
+                        "Closing it as zombie before triggering a new rebalance.", taskTypeName, task.id());
                 final RuntimeException fatalException = closeZombieTask(task);
                 if (fatalException != null) {
                     throw fatalException;
                 }
                 it.remove();
-                if (firstException == null) {
-                    firstException = e;
-                }
+                throw e;
             } catch (final RuntimeException t) {
                 log.error("Failed to {} {} {} due to the following error:",
                           action.name(),
@@ -415,6 +418,8 @@ abstract class AssignedTasks<T extends Task> {
             try {
                 task.close(clean, false);
             } catch (final TaskMigratedException e) {
+                log.info("Failed to close {} {} since it got migrated to another thread already. " +
+                        "Closing it as zombie and move on.", taskTypeName, task.id());
                 firstException.compareAndSet(null, closeZombieTask(task));
             } catch (final RuntimeException t) {
                 log.error("Failed while closing {} {} due to the following error:",

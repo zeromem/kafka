@@ -66,6 +66,7 @@ object ZkUtils {
   val BrokerSequenceIdPath = s"$BrokersPath/seqid"
   val ConfigChangesPath = s"$ConfigPath/changes"
   val ConfigUsersPath = s"$ConfigPath/users"
+  val ConfigBrokersPath = s"$ConfigPath/brokers"
   val ProducerIdBlockPath = "/latest_producer_id_block"
 
   val SecureZkRootPaths = ZkData.SecureRootPaths
@@ -591,7 +592,7 @@ class ZkUtils(val zkClient: ZkClient,
   }
 
   /**
-   * Update the value of a persistent node with the given path and data.
+   * Update the value of a ephemeral node with the given path and data.
    * create parent directory if necessary. Never throw NodeExistException.
    */
   def updateEphemeralPath(path: String, data: String, acls: java.util.List[ACL] = UseDefaultAcls): Unit = {

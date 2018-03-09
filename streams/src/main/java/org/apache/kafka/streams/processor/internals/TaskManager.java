@@ -300,7 +300,6 @@ class TaskManager {
         return active.runningTaskFor(partition);
     }
 
-
     StandbyTask standbyTask(final TopicPartition partition) {
         return standby.runningTaskFor(partition);
     }
@@ -327,6 +326,7 @@ class TaskManager {
         standby.initializeNewTasks();
 
         final Collection<TopicPartition> restored = changelogReader.restore(active);
+
         resumed.addAll(active.updateRestored(restored));
 
         if (!resumed.isEmpty()) {

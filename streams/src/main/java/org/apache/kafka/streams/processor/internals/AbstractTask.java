@@ -52,6 +52,7 @@ public abstract class AbstractTask implements Task {
     final Logger log;
     final LogContext logContext;
     boolean taskInitialized;
+    boolean taskClosed;
     final StateDirectory stateDirectory;
 
     InternalProcessorContext processorContext;
@@ -196,10 +197,11 @@ public abstract class AbstractTask implements Task {
     }
 
     /**
-     * @throws IllegalStateException If store gets registered after initialized is already finished
      * @throws StreamsException if the store's change log does not contain the partition
+     *
+     * Package-private for testing only
      */
-    void initializeStateStores() {
+    void registerStateStores() {
         if (topology.stateStores().isEmpty()) {
             return;
         }
@@ -255,6 +257,9 @@ public abstract class AbstractTask implements Task {
         }
     }
 
+    public boolean isClosed() {
+        return taskClosed;
+    }
 
     public boolean hasStateStores() {
         return !topology.stateStores().isEmpty();

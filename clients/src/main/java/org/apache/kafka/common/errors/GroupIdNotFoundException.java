@@ -14,19 +14,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.kafka.common.errors;
 
-package org.apache.kafka.common.security.scram;
+public class GroupIdNotFoundException extends ApiException {
+    private final String groupId;
 
-import javax.security.auth.callback.Callback;
-
-public class DelegationTokenAuthenticationCallback implements Callback {
-    private boolean tokenauth;
-
-    public String extension() {
-        return ScramLoginModule.TOKEN_AUTH_CONFIG + "=" +  Boolean.toString(tokenauth);
+    public GroupIdNotFoundException(String groupId) {
+        super("The group id " + groupId + " was not found");
+        this.groupId = groupId;
     }
 
-    public void tokenauth(Boolean tokenauth) {
-        this.tokenauth = tokenauth;
+    public String groupId() {
+        return groupId;
     }
+
 }
